@@ -6,16 +6,21 @@ from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 from rapidfuzz import process, fuzz
-from sentence_transformers import SentenceTransformer, util
-import pickle
 import numpy as np
+from pinecone.grpc import PineconeGRPC as Pinecone
+from pinecone import ServerlessSpec
 
 app = FastAPI()
+pc = Pinecone(
+    api_key="pcsk_368Tpa_ULGYwn74G43mBVq1hEUaaReNWtM38AFjwhU3cpJjKvpXqaV4GxJDGWaY12tagMR")
+
+index = pc.Index("the-office")
 
 
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
+
 
 # Get the folder where this script is located
 current_folder = Path(__file__).resolve().parent
@@ -32,12 +37,6 @@ df.replace(pd.NA, "", inplace=True)
 # df.replace("", pd.NA, inplace=True)
 # df.dropna(inplace=True)
 # df = df.reset_index(drop=True)
-
-# Load the array from the file
-with open(current_folder / "all_embeddings.pkl", "rb") as f:
-    all_embeddings = pickle.load(f)
-
-model = SentenceTransformer('all-MiniLM-L6-v2')
 
 origins = [
     "http://localhost",
@@ -68,15 +67,37 @@ def rapidfuzz(query: str, limit: int = 5):
     fuzz_match = process.extract(
         query, choices=df["lower"], scorer=fuzz.partial_ratio, score_cutoff=0.8, limit=limit)
 
-    query_embeddings = model.encode(query)
-    similarity_scores = util.pytorch_cos_sim(
-        all_embeddings, query_embeddings).view(-1)
-    top_indices = np.argsort(similarity_scores).tolist()[::-1]
+    embeddings = pc.inference.embed(
+        model="multilingual-e5-large",
+        inputs=[query],
+        parameters={"input_type": "passage", "truncate": "END"}
+    )
+
+    # Convert the query into a numerical vector that Pinecone can search with
+    query_embedding = pc.inference.embed(
+        model="multilingual-e5-large",
+        inputs=[query],
+        parameters={
+            "input_type": "query"
+        }
+    )
+
+    # Search the index for the three most similar vectors
+    results = index.query(
+        namespace="example-namespace",
+        vector=query_embedding[0].values,
+        top_k=limit,
+        include_values=False,
+        include_metadata=True
+    )
+
+    rows = [int(result['id'])-1 for result in results['matches']]
+    scores = [result['score'] for result in results['matches']]
 
     sentence_match = []
-    for row in top_indices[:limit]:
+    for i in range(len(rows)):
         sentence_match.append(
-            (row, round(similarity_scores[row].tolist(), 2)*100, row))
+            (rows[i], scores[i]*100, rows[i]))
 
     return_body = {}
     counter = 0
@@ -108,4 +129,3 @@ def convert_to_json(return_body, counter, arr, name):
         }
         counter += 1
     return return_body, counter
-
